@@ -101,9 +101,14 @@ def load_code(repo, ref):
     repo_path = "repos/" + repo
     github_url = "https://github.com/" + repo + ".git"
     if not os.path.isdir(repo_path):
+        print("waiting for repo lock")
         with redis.lock(repo):
-            os.makedirs(repo_path + "/.tmp")
+            os.makedirs(repo_path)
             git.clone(github_url, repo_path)
+
+            # We must make .tmp after cloning because cloning will fail when the
+            # directory isn't empty.
+            os.makedirs(repo_path + "/.tmp")
     with redis.lock(repo):
         os.chdir(repo_path)
         git.fetch(github_url, ref)
@@ -125,7 +130,7 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
     if "file_pattern" in mike_cfg["binaries"]:
         fn = None
         try:
-            fn = mike_cfg["binaries"]["file_pattern"].format(board=board["board"], short_sha=ref[:7])
+            fn = mike_cfg["binaries"]["file_pattern"].format(board=board["board"], short_sha=ref[:7], extension="uf2")
         except KeyError as e:
             redis.append(log_key, "Unable to construct filename because of unknown key: {0}\n".format(str(e)))
             return (repo_lock_token, False, True)
@@ -280,7 +285,7 @@ def travis():
         sha = data["head_commit"]
 
     print(sha)
-    print(data)
+    #print(data)
 
     if data["state"] in ("started", ):
         print("travis started")

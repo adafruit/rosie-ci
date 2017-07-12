@@ -34,6 +34,52 @@ redis = redis.Redis()
 def redis_log(key, message):
     redis.append(key, message)
 
+def run_circuitpython_tests(log_key, mountpoint, serial_connection, tests):
+    # Get into the REPL and disable autoreload.
+    serial_connection.write(b'\x03\x03')
+    serial_connection.reset_input_buffer()
+    serial_connection.write(b"import samd\r")
+    serial_connection.write(b"samd.disable_autoreload()\r")
+    time.sleep(0.1)
+    output = serial_connection.read(serial_connection.in_waiting)
+    if not output.endswith(b"samd.disable_autoreload()\r\n>>> "):
+        redis_log(log_key, output)
+        raise RuntimeError("Unable to enter the REPL.")
+
+    test_files = []
+    if "test_directories" in tests:
+        for directory in tests["test_directories"]:
+            for fn in os.listdir(directory):
+                if fn.endswith(".py"):
+                    test_files.append(directory + "/" + fn)
+
+    tests_ok = True
+    for test_file in test_files[:10]:
+        print(test_file)
+        if os.path.isfile(test_file + ".exp"):
+            continue
+
+        shutil.copy(test_file, mountpoint + "/code.py")
+
+        serial_connection.reset_input_buffer()
+        serial_connection.write(b"\x04")
+        output = b""
+        start_time = time.monotonic()
+        while not output.endswith(b"Use CTRL-D to reload.\r\n") and time.monotonic() - start_time < 10:
+            if serial_connection.in_waiting > 0:
+                output += serial_connection.read(serial_connection.in_waiting)
+            else:
+                time.sleep(0.05)
+        if not output.endswith(b"Use CTRL-D to reload.\r\n"):
+            redis_log(log_key, test_file + " timed out:")
+            print(output)
+            redis_log(log_key, output)
+            serial_connection.write(b'\x03\x03')
+            tests_ok = False
+
+        #redis_log(log_key, output)
+    return tests_ok
+
 def run_tests(board, binary, tests, log_key=None):
     serial_device_name = None
     for port in list_ports.comports():
@@ -100,7 +146,7 @@ def run_tests(board, binary, tests, log_key=None):
                 if not serial_device_name:
                     raise RuntimeError("No CircuitPython serial connection found at path: " + board["path"])
                 with serial.Serial("/dev/" + serial_device_name) as conn:
-                    pass
+                    run_circuitpython_tests(log_key, mountpoint, conn, tests["circuitpython_tests"])
 
 
     return True

@@ -146,7 +146,11 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
         for obj in b.objects.filter(Prefix=prefix):
             if obj.key.endswith(suffix):
                 tmp_filename = ".tmp/" + obj.key.rsplit("/", 1)[1]
-                b.download_file(obj.key, tmp_filename)
+                try:
+                    b.download_file(obj.key, tmp_filename)
+                except FileNotFoundError as e:
+                    redis.append(log_key, "Unable to download binary for board {0}.".format(board))
+                    return (repo_lock_token, False, True)
                 binary = tmp_filename
                 break
     if binary == None:
@@ -217,6 +221,7 @@ def test_commit(repo, ref):
 #Compare the HMAC hash signature
 def verify_hmac_hash(data, signature):
     if not github_webhook_secret:
+        print("No GitHub webhook secret loaded.")
         return False
     mac = hmac.new(github_webhook_secret, msg=data, digestmod=hashlib.sha1)
     return hmac.compare_digest('sha1=' + mac.hexdigest(), signature)

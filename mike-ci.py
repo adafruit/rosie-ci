@@ -93,7 +93,8 @@ def set_status(repo, sha, state, target_url, description):
     redis.append("log:" + repo + "/" + sha, "Commit state %s: %s\n" % (state, description))
 
 def final_status(repo, sha, state, description):
-    set_status(repo, sha, state, "https://adafruit.com", description)
+    # TODO(tannewt): Upload to the public S3 bucket instead. These may disappear.
+    set_status(repo, sha, state, "https://mike-ci.ngrok.io/log/" + repo + "/" + sha, description)
 
 @celery.task()
 def load_code(repo, ref):

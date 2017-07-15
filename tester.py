@@ -34,7 +34,7 @@ redis = redis.Redis()
 def redis_log(key, message):
     redis.append(key, message)
 
-def run_circuitpython_tests(log_key, mountpoint, serial_connection, tests):
+def run_circuitpython_tests(log_key, board_name, mountpoint, serial_connection, tests):
     # Get into the REPL and disable autoreload.
     serial_connection.write(b'\x03\x03')
     serial_connection.reset_input_buffer()
@@ -54,30 +54,42 @@ def run_circuitpython_tests(log_key, mountpoint, serial_connection, tests):
                     test_files.append(directory + "/" + fn)
 
     tests_ok = True
-    for test_file in test_files[:10]:
-        print(test_file)
+    for test_file in test_files[10:]:
         if os.path.isfile(test_file + ".exp"):
+            #print(test_file)
             continue
 
         shutil.copy(test_file, mountpoint + "/code.py")
+        os.sync()
 
         serial_connection.reset_input_buffer()
         serial_connection.write(b"\x04")
         output = b""
+        safe_mode = False
         start_time = time.monotonic()
         while not output.endswith(b"Use CTRL-D to reload.\r\n") and time.monotonic() - start_time < 10:
-            if serial_connection.in_waiting > 0:
-                output += serial_connection.read(serial_connection.in_waiting)
-            else:
-                time.sleep(0.05)
-        if not output.endswith(b"Use CTRL-D to reload.\r\n"):
-            redis_log(log_key, test_file + " timed out:")
-            print(output)
-            redis_log(log_key, output)
+            try:
+                if serial_connection.in_waiting > 0:
+                    output += serial_connection.read(serial_connection.in_waiting)
+                else:
+                    time.sleep(0.05)
+            except OSError as e:
+                # We get OSError if our USB dies from safe mode.
+                safe_mode = True
+                break
+
+        if safe_mode:
+            redis_log(log_key, test_file + " crashed on " + board_name + "!\n" + output.decode("utf-8") + "\n")
+            tests_ok = False
+            # TODO(tannewt): Recover out of safe mode and continue tests.
+            break
+        elif not output.endswith(b"Use CTRL-D to reload.\r\n"):
+            redis_log(log_key, test_file + " timed out on " + board_name + ":\n" + output.decode("utf-8") + "\n")
             serial_connection.write(b'\x03\x03')
             tests_ok = False
-
-        #redis_log(log_key, output)
+        elif b"Traceback (most recent call last):" in output:
+            redis_log(log_key, test_file + " threw an exception on " + board_name + ":\n" + output.decode("utf-8") + "\n")
+            tests_ok = False
     return tests_ok
 
 def run_tests(board, binary, tests, log_key=None):
@@ -89,6 +101,7 @@ def run_tests(board, binary, tests, log_key=None):
         raise RuntimeError("Board not found at path: " + board["path"])
 
     bootloader = board["bootloader"]
+    tests_ok = True
 
     with redis.lock("lock:device@" + board["path"], timeout=60*20) as lock:
         # Trigger the bootloader.
@@ -121,14 +134,14 @@ def run_tests(board, binary, tests, log_key=None):
             # was flashed.
             sh.pumount(mountpoint)
 
-        time.sleep(5)
-
         if "circuitpython_tests" in tests:
             # First find our CircuitPython disk.
+            start_time = time.monotonic()
             disk_path = None
-            for disk in os.listdir("/dev/disk/by-path"):
-                if board["path"] in disk and disk.endswith("part1"):
-                    disk_path = disk
+            while not disk_path and time.monotonic() - start_time < 10:
+                for disk in os.listdir("/dev/disk/by-path"):
+                    if board["path"] in disk and disk.endswith("part1"):
+                        disk_path = disk
             if not disk_path:
                 raise RuntimeError("Cannot find CIRCUITPY disk for device: " + board["path"])
 
@@ -146,10 +159,10 @@ def run_tests(board, binary, tests, log_key=None):
                 if not serial_device_name:
                     raise RuntimeError("No CircuitPython serial connection found at path: " + board["path"])
                 with serial.Serial("/dev/" + serial_device_name) as conn:
-                    run_circuitpython_tests(log_key, mountpoint, conn, tests["circuitpython_tests"])
+                    tests_ok = run_circuitpython_tests(log_key, board["board"], mountpoint, conn, tests["circuitpython_tests"]) and tests_ok
 
 
-    return True
+    return tests_ok
 
 if __name__ == "__main__":
     pass

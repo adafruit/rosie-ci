@@ -20,16 +20,16 @@ On raspbian:
 
   sudo apt-get update # make sure you have the latest packages
   sudo apt-get upgrade # make sure already installed packages are latest
-  sudo apt-get install git python3 python3-pip redis-server
+  sudo apt-get install git python3 python3-venv python3-pip redis-server libffi-dev libssl-dev pmount
 
 First, set up a virtual environment and install the deps. (This is Raspberry Pi
 specific. Debian has done some weird things around pip.)
 
 .. code-block:: shell
 
-  python3 -m venv .env --without-pip --system-site-packages
+  python3 -m venv .env
   source .env/bin/activate
-  python3 -m pip install -r requirements.txt
+  pip install -r requirements.txt
 
 Usage Example
 =============

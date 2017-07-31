@@ -6,7 +6,7 @@ Introduction
     :target: https://gitter.im/adafruit/circuitpython?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge
     :alt: Gitter
 
-Mike is an on-microcontroller testing service that runs on a Raspberry Pi. Its
+Rosie is an on-microcontroller testing service that runs on a Raspberry Pi. Its
 meant to run after Travis builds and tests binaries. Build artifacts and test
 results are stored to an Amazon S3 bucket. It is used to test
 `Adafruit CircuitPython <https://github.com/adafruit/circuitpython>`_.
@@ -34,21 +34,17 @@ specific. Debian has done some weird things around pip.)
 Usage Example
 =============
 
-To run Mike do:
-
-.. code-block:: shell
-
-  ./start.sh
+To run Rosie follow the commands in start.sh. Eventually you'll just run it.
 
 How it works
 ============
 
-Mike uses Flask to accept webhooks from GitHub and Celery. The GitHub webhook
+Rosie uses Flask to accept webhooks from GitHub and Celery. The GitHub webhook
 triggers a fetch of the commit data. The first "starting" Travis webhook simply
-triggers Mike to notify GitHub that it intends on testing the commit. Mike waits
-until Travis finishes because it relies on build artifacts that Travis creates.
-This approach ensures a consistent build environment for binaries (and Debian on
-Raspberry Pi has old ARM GCC packages).
+triggers Rosie to notify GitHub that it intends on testing the commit. Rosie then
+waits until Travis finishes because it relies on build artifacts that Travis
+creates. This approach ensures a consistent build environment for binaries (and
+Debian on Raspberry Pi has old ARM GCC packages).
 
 Celery is backed by Redis for scheduling and communication. Redis is also used
 for temporary logs and locking resources such as repos and boards.
@@ -57,7 +53,7 @@ Contributing
 ============
 
 Contributions are welcome! Please read our `Code of Conduct
-<https://github.com/adafruit/Adafruit_CircuitPython_mike-ci/blob/master/CODE_OF_CONDUCT.md>`_
+<https://github.com/adafruit/rosie-ci/blob/master/CODE_OF_CONDUCT.md>`_
 before contributing to help this project stay welcoming.
 
 API Reference

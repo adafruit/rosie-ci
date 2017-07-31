@@ -62,7 +62,7 @@ app.config.update(
 celery = make_celery(app)
 
 config = {}
-with open('.mike.yml') as f:
+with open('.rosie.yml') as f:
     config = yaml.safe_load(f)
 
 redis = redis.StrictRedis()
@@ -85,7 +85,7 @@ def set_status(repo, sha, state, target_url, description):
         "state": state,
         "target_url": target_url,
         "description": description,
-        "context": "mike-ci/" + config["overall"]["node-name"]
+        "context": "rosie-ci/" + config["overall"]["node-name"]
     }
     r = requests.post("https://api.github.com/repos/" + repo + "/statuses/" + sha,
                       json=data,
@@ -94,7 +94,7 @@ def set_status(repo, sha, state, target_url, description):
 
 def final_status(repo, sha, state, description):
     # TODO(tannewt): Upload to the public S3 bucket instead. These may disappear.
-    set_status(repo, sha, state, "https://mike-ci.ngrok.io/log/" + repo + "/" + sha, description)
+    set_status(repo, sha, state, "https://rosie-ci.ngrok.io/log/" + repo + "/" + sha, description)
 
 @celery.task()
 def load_code(repo, ref):

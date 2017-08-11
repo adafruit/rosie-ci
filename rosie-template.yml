@@ -1,0 +1,15 @@
+overall:
+    node-name: <node name> # This identifies what mike instance this is in logs and on GitHub.
+    github-username: <username> # This should match the personal access token in
+                                # env.sh. Its used for logging into github and
+                                # setting commit status.
+devices:
+    - board: <board name>  # This is the board name used by CircuitPython
+      path: <path>        # This is the USB path as found in /dev/disk/by-path between the first two :.
+                       # For example: platform-3f980000.usb-usb-0:1.5.4:1.2-scsi-0:0:0:0
+                       # is 1.5.4.
+      bootloader: uf2  # For now, only uf2 is supported.
+    #- board: <board name>
+    #  path: <path>
+    #  bootloader: uf2
+    # Additional boards go here.

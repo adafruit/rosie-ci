@@ -34,7 +34,7 @@ redis = redis.Redis()
 def redis_log(key, message):
     redis.append(key, message)
 
-def run_circuitpython_tests(log_key, board_name, mountpoint, serial_connection, tests):
+def run_circuitpython_tests(log_key, board_name, test_env, mountpoint, serial_connection, tests):
     # Get into the REPL and disable autoreload.
     serial_connection.write(b'\x03\x03')
     serial_connection.reset_input_buffer()
@@ -53,14 +53,28 @@ def run_circuitpython_tests(log_key, board_name, mountpoint, serial_connection, 
                 if fn.endswith(".py"):
                     test_files.append(directory + "/" + fn)
 
+    with open(mountpoint + "/test_env.py", "w") as f:
+        f.write("board = {0}\n".format(repr(board_name)))
+        if test_env:
+            for key in test_env:
+                f.write("{0} = {1}\n".format(key, repr(test_env[key])))
+
+    if "test_helper" in tests:
+        for filename in tests["test_helper"]:
+            if os.path.isfile(filename):
+                shutil.copy(filename, mountpoint + "/")
+            else:
+                redis_log(log_key, "Unable to find test helper: {0}\n".format(filename))
+
     tests_ok = True
-    for test_file in test_files[10:]:
+    outcome = {"passed": 0, "skipped": 0, "failed": 0, "crashed": 0, "timed out": 0}
+    for test_file in test_files:
         if os.path.isfile(test_file + ".exp"):
-            #print(test_file)
             continue
 
         shutil.copy(test_file, mountpoint + "/code.py")
         os.sync()
+        time.sleep(0.05)
 
         serial_connection.reset_input_buffer()
         serial_connection.write(b"\x04")
@@ -81,15 +95,25 @@ def run_circuitpython_tests(log_key, board_name, mountpoint, serial_connection, 
         if safe_mode:
             redis_log(log_key, test_file + " crashed on " + board_name + "!\n" + output.decode("utf-8") + "\n")
             tests_ok = False
+            outcome["crashed"] += 1
             # TODO(tannewt): Recover out of safe mode and continue tests.
             break
         elif not output.endswith(b"Use CTRL-D to reload.\r\n"):
             redis_log(log_key, test_file + " timed out on " + board_name + ":\n" + output.decode("utf-8") + "\n")
             serial_connection.write(b'\x03\x03')
             tests_ok = False
+            outcome["timed out"] += 1
         elif b"Traceback (most recent call last):" in output:
             redis_log(log_key, test_file + " threw an exception on " + board_name + ":\n" + output.decode("utf-8") + "\n")
             tests_ok = False
+            outcome["failed"] += 1
+        elif b"SKIP" in output:
+            outcome["skipped"] += 1
+        else:
+            outcome["passed"] += 1
+    test_outcomes = "; ".join([str(outcome[x]) + " tests " + x for x in sorted(outcome.keys())])
+    test_outcomes += " on board " + board_name + ".\n"
+    redis_log(log_key, test_outcomes)
     return tests_ok
 
 def run_tests(board, binary, tests, log_key=None):
@@ -159,7 +183,7 @@ def run_tests(board, binary, tests, log_key=None):
                 if not serial_device_name:
                     raise RuntimeError("No CircuitPython serial connection found at path: " + board["path"])
                 with serial.Serial("/dev/" + serial_device_name) as conn:
-                    tests_ok = run_circuitpython_tests(log_key, board["board"], mountpoint, conn, tests["circuitpython_tests"]) and tests_ok
+                    tests_ok = run_circuitpython_tests(log_key, board["board"], board["test_env"], mountpoint, conn, tests["circuitpython_tests"]) and tests_ok
 
 
     return tests_ok

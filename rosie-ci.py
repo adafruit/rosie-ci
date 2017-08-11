@@ -121,17 +121,21 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
     log_key = "log:" + repo + "/" + ref
     os.chdir(repo_path)
     test_config_ok = True
-    mike_cfg = None
-    if os.path.isfile(".mike.yml"):
-        with open(".mike.yml", "r") as f:
-            mike_cfg = yaml.safe_load(f)
+    test_cfg = None
+    if os.path.isfile(".rosie.yml"):
+        with open(".rosie.yml", "r") as f:
+            test_cfg = yaml.safe_load(f)
 
-    b = anonymous_s3.Bucket(mike_cfg["binaries"]["prebuilt_s3"])
+    if not test_cfg or "binaries" not in test_cfg or "prebuilt_s3" not in test_cfg["binaries"]:
+        redis.append(log_key, "Missing or invalid .rosie.yml in repo.")
+        return (repo_lock_token, False, True)
+
+    b = anonymous_s3.Bucket(test_cfg["binaries"]["prebuilt_s3"])
     binary = None
-    if "file_pattern" in mike_cfg["binaries"]:
+    if "file_pattern" in test_cfg["binaries"]:
         fn = None
         try:
-            fn = mike_cfg["binaries"]["file_pattern"].format(board=board["board"], short_sha=ref[:7], extension="uf2")
+            fn = test_cfg["binaries"]["file_pattern"].format(board=board["board"], short_sha=ref[:7], extension="uf2")
         except KeyError as e:
             redis.append(log_key, "Unable to construct filename because of unknown key: {0}\n".format(str(e)))
             return (repo_lock_token, False, True)
@@ -154,7 +158,7 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
                 binary = tmp_filename
                 break
     if binary == None:
-        redis.append(log_key, "Unable to find binary for board {0}.".format(board))
+        redis.append(log_key, "Unable to find binary for board {0}.\n".format(board))
         return (repo_lock_token, False, True)
 
     test_config_ok = True
@@ -163,9 +167,9 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
     with redis.lock("lock:" + board["board"] + "-" + str(board["path"])):
         # Run the tests.
         try:
-            tests_ok = tester.run_tests(board, binary, mike_cfg, log_key=log_key)
+            tests_ok = tester.run_tests(board, binary, test_cfg, log_key=log_key)
         except Exception as e:
-            redis.append(log_key, "Exception while running tests:\n")
+            redis.append(log_key, "Exception while running tests on {0}:\n".format(board["board"]))
             redis.append(log_key, traceback.format_exc())
             test_config_ok = False
 
@@ -182,7 +186,7 @@ def start_test(self, repo, ref):
     if not l.acquire(blocking=False):
         raise self.retry(countdown=10)
     print("Lock grabbed")
-    set_status(repo, ref, "pending", "https://adafruit.com", "Commencing Mike test.")
+    set_status(repo, ref, "pending", "https://adafruit.com", "Commencing Rosie test.")
     repo_path = cwd + "/repos/" + repo
     os.chdir(repo_path)
     log_key = "log:" + repo + "/" + ref
@@ -190,7 +194,7 @@ def start_test(self, repo, ref):
         redis.append(log_key, git.checkout(ref))
     except sh.ErrorReturnCode_128 as e:
         redis.append(log_key, e.full_cmd + "\n" + e.stdout.decode('utf-8') + "\n" + e.stderr.decode('utf-8'))
-        final_status(repo, ref, "error", "Git error in Mike.")
+        final_status(repo, ref, "error", "Git error in Rosie.")
         l.release()
         return None
     return l.local.token.decode("utf-8")
@@ -298,7 +302,7 @@ def travis():
         set_status(repo, sha, "pending", data["build_url"], "Waiting on Travis to complete.")
     elif data["state"] in ("passed", "failed"):
         print("travis finished")
-        set_status(repo, sha, "pending", data["build_url"], "Queueing Mike test.")
+        set_status(repo, sha, "pending", data["build_url"], "Queueing Rosie test.")
         test_commit(repo, sha)
     elif data["state"] is ("cancelled", ):
         print("travis cancelled")
@@ -314,7 +318,7 @@ def travis():
 def rerun(owner, repo, sha):
     repo = owner + "/" + repo
     key = repo + "/" + sha
-    set_status(repo, sha, "pending", "https://mike-ci.ngrok.io/log/" + key, "Queueing manual Mike test.")
+    set_status(repo, sha, "pending", "https://mike-ci.ngrok.io/log/" + key, "Queueing manual Rosie test.")
 
     test_commit(repo, sha)
     return jsonify({"msg": "Ok"})

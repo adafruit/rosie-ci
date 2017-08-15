@@ -45,6 +45,8 @@ from flask import abort
 from flask import json
 from flask import Response
 
+from werkzeug.utils import secure_filename
+
 from tasks import make_celery
 
 from celery import group
@@ -127,19 +129,35 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
         with open(".rosie.yml", "r") as f:
             test_cfg = yaml.safe_load(f)
 
-    if not test_cfg or "binaries" not in test_cfg or "prebuilt_s3" not in test_cfg["binaries"]:
-        redis.append(log_key, "Missing or invalid .rosie.yml in repo.")
+    if not test_cfg or "binaries" not in test_cfg or not ("prebuilt_s3" in test_cfg["binaries"] or "rosie_upload" in test_cfg["binaries"]):
+        redis.append(log_key, "Missing or invalid .rosie.yml in repo.\n")
         return (repo_lock_token, False, True)
 
-    b = anonymous_s3.Bucket(test_cfg["binaries"]["prebuilt_s3"])
-    binary = None
-    if "file_pattern" in test_cfg["binaries"]:
+
+    if "rosie_upload" in test_cfg["binaries"]:
         fn = None
         try:
-            fn = test_cfg["binaries"]["file_pattern"].format(board=board["board"], short_sha=ref[:7], extension="uf2")
+            fn = test_cfg["binaries"]["rosie_upload"]["file_pattern"].format(board=board["board"], short_sha=ref[:7], extension="uf2")
         except KeyError as e:
             redis.append(log_key, "Unable to construct filename because of unknown key: {0}\n".format(str(e)))
             return (repo_lock_token, False, True)
+        print("finding file:", fn)
+
+        binary = None
+        redis_file = redis.get("file:" + fn)
+        if redis_file:
+            tmp_filename = secure_filename(".tmp/" + fn.rsplit("/", 1)[-1])
+            with open(tmp_filename, "wb") as f:
+                f.write(redis_file)
+            binary = tmp_filename
+    elif "prebuilt_s3" in test_cfg["binaries"]:
+        fn = None
+        try:
+            fn = test_cfg["binaries"]["prebuilt_s3"]["file_pattern"].format(board=board["board"], short_sha=ref[:7], extension="uf2")
+        except KeyError as e:
+            redis.append(log_key, "Unable to construct filename because of unknown key: {0}\n".format(str(e)))
+            return (repo_lock_token, False, True)
+        b = anonymous_s3.Bucket(test_cfg["binaries"]["prebuilt_s3"]["bucket"])
         prefix = fn
         suffix = None
         if "*" in prefix:
@@ -288,25 +306,26 @@ def travis():
         abort(401)
     data = json.loads(request.form["payload"])
 
-    print(data["branch"])
     repo = data["repository"]["owner_name"] + "/" + data["repository"]["name"]
     build_number = data["id"]
     sha = data["commit"]
     if data["type"] == "pull_request":
         sha = data["head_commit"]
 
-    print(sha)
-    #print(data)
+    upload_lock = "upload-lock:" + sha
 
     if data["state"] in ("started", ):
-        print("travis started")
+        print("travis started", sha)
+        redis.setex(upload_lock, 20 * 60, "locked")
         set_status(repo, sha, "pending", data["build_url"], "Waiting on Travis to complete.")
     elif data["state"] in ("passed", "failed"):
         print("travis finished")
         set_status(repo, sha, "pending", data["build_url"], "Queueing Rosie test.")
+        redis.delete(upload_lock)
         test_commit(repo, sha)
     elif data["state"] is ("cancelled", ):
         print("travis cancelled")
+        redis.delete(upload_lock)
         set_status(repo, sha, "error", data["build_url"], "Travis cancelled.")
     elif data["status"] is None:
         set_status(repo, sha, "error", data["build_url"], "Travis error.")
@@ -314,6 +333,27 @@ def travis():
         print("unhandled state:", data["state"])
         print(data)
     return jsonify({'status': 'received'})
+
+@app.route("/upload/<sha>", methods=["POST"])
+def upload_file(sha):
+     if not redis.get("upload-lock:" + sha):
+         abort(403)
+     # check if the post request has the file part
+     if 'file' not in request.files:
+         abort(400)
+     f = request.files['file']
+     # if user does not select file, browser also
+     # submit a empty part without filename
+     if f.filename == '':
+         abort(400)
+     if f and f.filename == secure_filename(f.filename):
+         filename = secure_filename(f.filename)
+         # Store files in redis with an expiration so we hopefully don't leak resources.
+         redis.setex("file:" + filename, 60 * 10, f.read())
+         print(filename, "uploaded")
+     else:
+         abort(400)
+     return jsonify({'msg': 'Ok'})
 
 @app.route("/rerun/<owner>/<repo>/<sha>", methods=['GET'])
 def rerun(owner, repo, sha):

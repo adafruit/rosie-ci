@@ -97,23 +97,24 @@ def final_status(repo, sha, state, description):
     set_status(repo, sha, state, "https://rosie-ci.ngrok.io/log/" + repo + "/" + sha, description)
 
 @celery.task()
-def load_code(repo, ref):
+def load_code(base_repo, head_repo, ref):
     os.chdir(cwd)
-    repo_path = "repos/" + repo
-    github_url = "https://github.com/" + repo + ".git"
+    repo_path = "repos/" + base_repo
+    github_base_url = "https://github.com/" + base_repo + ".git"
+    github_head_url = "https://github.com/" + head_repo + ".git"
     if not os.path.isdir(repo_path):
         print("waiting for repo lock")
-        with redis.lock(repo):
+        with redis.lock(base_repo):
             os.makedirs(repo_path)
-            git.clone(github_url, repo_path)
+            git.clone(github_base_url, repo_path)
 
             # We must make .tmp after cloning because cloning will fail when the
             # directory isn't empty.
             os.makedirs(repo_path + "/.tmp")
-    with redis.lock(repo):
+    with redis.lock(base_repo):
         os.chdir(repo_path)
-        git.fetch(github_url, ref)
-    print("loaded", repo, ref)
+        git.fetch(github_head_url, ref)
+    print("loaded", head_repo, ref)
 
 @celery.task(priority=9)
 def test_board(repo_lock_token, ref=None, repo=None, board=None):
@@ -195,8 +196,6 @@ def start_test(self, repo, ref):
     except sh.ErrorReturnCode_128 as e:
         redis.append(log_key, e.full_cmd + "\n" + e.stdout.decode('utf-8') + "\n" + e.stderr.decode('utf-8'))
         final_status(repo, ref, "error", "Git error in Rosie.")
-        l.release()
-        return None
     return l.local.token.decode("utf-8")
 
 @celery.task(priority=9)
@@ -242,10 +241,12 @@ def github():
     # Fetch
     if event in ("push", "create"):
         load_code.delay(request.json["repository"]["full_name"],
+                        request.json["repository"]["full_name"],
                         request.json["ref"])
     elif event == "pull_request":
-        load_code.delay(request.json["pull_request"]["head"]["repo"]["full_name"],
-                        request.json["pull_request"]["head"]["sha"])
+        load_code.delay(request.json["pull_request"]["base"]["repo"]["full_name"],
+                        request.json["pull_request"]["head"]["repo"]["full_name"],
+                        request.json["pull_request"]["head"]["ref"])
     elif event == "release":
         pass # Don't do anything now. The tag should already be tested after a
         # create event.

@@ -28,6 +28,7 @@ import os
 import os.path
 import traceback
 import redis
+import sys
 
 import sh
 from sh import git
@@ -141,7 +142,11 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
         except KeyError as e:
             redis.append(log_key, "Unable to construct filename because of unknown key: {0}\n".format(str(e)))
             return (repo_lock_token, False, True)
-        print("finding file:", fn)
+        except Exception as e:
+            e = sys.exc_info()[0]
+            redis.append(log_key, "Other error: {0}\n".format(e))
+            return (repo_lock_token, False, True)
+        print("finding file in redis: " + fn)
 
         binary = None
         redis_file = redis.get("file:" + fn)
@@ -150,12 +155,17 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
             with open(tmp_filename, "wb") as f:
                 f.write(redis_file)
             binary = tmp_filename
-    elif "prebuilt_s3" in test_cfg["binaries"]:
+    if binary is None and "prebuilt_s3" in test_cfg["binaries"]:
+        print("looking in aws")
         fn = None
         try:
             fn = test_cfg["binaries"]["prebuilt_s3"]["file_pattern"].format(board=board["board"], short_sha=ref[:7], extension="uf2")
         except KeyError as e:
             redis.append(log_key, "Unable to construct filename because of unknown key: {0}\n".format(str(e)))
+            return (repo_lock_token, False, True)
+        except Exception as e:
+            e = sys.exc_info()[0]
+            redis.append(log_key, "Other error: {0}\n".format(e))
             return (repo_lock_token, False, True)
         b = anonymous_s3.Bucket(test_cfg["binaries"]["prebuilt_s3"]["bucket"])
         prefix = fn
@@ -203,7 +213,7 @@ def start_test(self, repo, ref):
     print("grabbing lock")
     # Retry the task in 10 seconds if the lock can't be grabbed.
     if not l.acquire(blocking=False):
-        raise self.retry(countdown=10)
+        raise self.retry(countdown=30, max_retries=10)
     print("Lock grabbed")
     set_status(repo, ref, "pending", "https://adafruit.com", "Commencing Rosie test.")
     repo_path = cwd + "/repos/" + repo

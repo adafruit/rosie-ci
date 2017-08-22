@@ -134,7 +134,7 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
         redis.append(log_key, "Missing or invalid .rosie.yml in repo.\n")
         return (repo_lock_token, False, True)
 
-
+    binary = None
     if "rosie_upload" in test_cfg["binaries"]:
         fn = None
         try:
@@ -148,7 +148,6 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
             return (repo_lock_token, False, True)
         print("finding file in redis: " + fn)
 
-        binary = None
         redis_file = redis.get("file:" + fn)
         if redis_file:
             tmp_filename = secure_filename(".tmp/" + fn.rsplit("/", 1)[-1])

@@ -70,10 +70,6 @@ with open('.rosie.yml') as f:
 
 redis = redis.StrictRedis()
 
-github_webhook_secret = None
-if "GITHUB_WEBHOOK_SECRET" in os.environ:
-    github_webhook_secret = os.environ["GITHUB_WEBHOOK_SECRET"].encode("utf-8")
-
 github_personal_access_token = None
 if "GITHUB_ACCESS_TOKEN" in os.environ:
     github_personal_access_token = os.environ["GITHUB_ACCESS_TOKEN"]
@@ -100,11 +96,30 @@ def final_status(repo, sha, state, description):
     set_status(repo, sha, state, "https://rosie-ci.ngrok.io/log/" + repo + "/" + sha, description)
 
 @celery.task()
-def load_code(base_repo, head_repo, ref):
+def load_code(repo, ref):
+    print("loading code from " + repo)
     os.chdir(cwd)
+
+    # Look up our original repo so that we only load objects once.
+    base_repo = redis.get("source:" + repo)
+    if base_repo is None:
+        r = requests.get("https://api.github.com/repos/" + repo,
+                         auth=(config["overall"]["github-username"], github_personal_access_token))
+        r = r.json()
+        base_repo = "source"
+        if "source" in r:
+            base_repo = r["source"]["full_name"]
+        redis.set("source:" + repo, base_repo)
+    if base_repo is "source":
+        base_repo = repo
+    if type(base_repo) is bytes:
+        base_repo = base_repo.decode("utf-8")
+
+    print("Source repo of " + repo + " is " + base_repo)
+
     repo_path = "repos/" + base_repo
     github_base_url = "https://github.com/" + base_repo + ".git"
-    github_head_url = "https://github.com/" + head_repo + ".git"
+    github_head_url = "https://github.com/" + repo + ".git"
     if not os.path.isdir(repo_path):
         print("waiting for repo lock")
         with redis.lock(base_repo):
@@ -117,11 +132,12 @@ def load_code(base_repo, head_repo, ref):
     with redis.lock(base_repo):
         os.chdir(repo_path)
         git.fetch(github_head_url, ref)
-    print("loaded", head_repo, ref)
+    print("loaded", repo, ref)
 
 @celery.task(priority=9)
 def test_board(repo_lock_token, ref=None, repo=None, board=None):
-    repo_path = cwd + "/repos/" + repo
+    base_repo = redis.get("source:" + repo).decode("utf-8")
+    repo_path = cwd + "/repos/" + base_repo
     log_key = "log:" + repo + "/" + ref
     os.chdir(repo_path)
     test_config_ok = True
@@ -147,8 +163,14 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
             redis.append(log_key, "Other error: {0}\n".format(e))
             return (repo_lock_token, False, True)
         print("finding file in redis: " + fn)
-
-        redis_file = redis.get("file:" + fn)
+        redis_file = None
+        if "*" in fn:
+            keys = redis.keys("file:" + fn)
+            keys.sort()
+            if len(keys) > 0:
+                redis_file = redis.get(keys[-1])
+        else:
+            redis_file = redis.get("file:" + fn)
         if redis_file:
             tmp_filename = secure_filename(".tmp/" + fn.rsplit("/", 1)[-1])
             with open(tmp_filename, "wb") as f:
@@ -208,14 +230,15 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
 # TODO(tannewt): Switch to separate queues if this causes lock contention.
 @celery.task(bind=True, priority=0)
 def start_test(self, repo, ref):
-    l = redis.lock(repo, timeout=60 * 60)
+    base_repo = redis.get("source:" + repo).decode("utf-8")
+    l = redis.lock(base_repo, timeout=60 * 60)
     print("grabbing lock")
     # Retry the task in 10 seconds if the lock can't be grabbed.
     if not l.acquire(blocking=False):
         raise self.retry(countdown=30, max_retries=10)
     print("Lock grabbed")
     set_status(repo, ref, "pending", "https://adafruit.com", "Commencing Rosie test.")
-    repo_path = cwd + "/repos/" + repo
+    repo_path = cwd + "/repos/" + base_repo
     os.chdir(repo_path)
     log_key = "log:" + repo + "/" + ref
     try:
@@ -227,7 +250,8 @@ def start_test(self, repo, ref):
 
 @celery.task(priority=9)
 def finish_test(results, repo, ref):
-    l = redis.lock(repo)
+    base_repo = redis.get("source:" + repo).decode("utf-8")
+    l = redis.lock(base_repo)
     l.local.token = results[0][0]
     l.release()
 
@@ -247,40 +271,6 @@ def finish_test(results, repo, ref):
 def test_commit(repo, ref):
     chain = start_test.s(repo, ref) | group(test_board.s(ref=ref, repo=repo, board=board) for board in config["devices"]) | finish_test.s(repo, ref)
     chain.delay()
-
-#Compare the HMAC hash signature
-def verify_hmac_hash(data, signature):
-    if not github_webhook_secret:
-        print("No GitHub webhook secret loaded.")
-        return False
-    mac = hmac.new(github_webhook_secret, msg=data, digestmod=hashlib.sha1)
-    return hmac.compare_digest('sha1=' + mac.hexdigest(), signature)
-
-@app.route("/github", methods=['POST'])
-def github():
-    signature = request.headers.get('X-Hub-Signature')
-    data = request.data
-    if not verify_hmac_hash(data, signature):
-        abort(401)
-
-    event = request.headers.get('X-GitHub-Event')
-
-    # Fetch
-    if event in ("push", "create"):
-        load_code.delay(request.json["repository"]["full_name"],
-                        request.json["repository"]["full_name"],
-                        request.json["ref"])
-    elif event == "pull_request":
-        load_code.delay(request.json["pull_request"]["base"]["repo"]["full_name"],
-                        request.json["pull_request"]["head"]["repo"]["full_name"],
-                        request.json["pull_request"]["head"]["ref"])
-    elif event == "release":
-        pass # Don't do anything now. The tag should already be tested after a
-        # create event.
-    else:
-        print(data)
-
-    return jsonify({'msg': 'Ok'})
 
 # Adapted from: https://gist.github.com/andrewgross/8ba32af80ecccb894b82774782e7dcd4
 def check_authorized(signature, public_key, payload):
@@ -325,6 +315,8 @@ def travis():
 
     if data["state"] in ("started", ):
         print("travis started", sha)
+        # Handle pulls differently.
+        load_code.delay(repo, "refs/heads/" + data["branch"])
         redis.setex(upload_lock, 20 * 60, "locked")
         set_status(repo, sha, "pending", data["build_url"], "Waiting on Travis to complete.")
     elif data["state"] in ("passed", "failed"):
@@ -358,7 +350,7 @@ def upload_file(sha):
      if f and f.filename == secure_filename(f.filename):
          filename = secure_filename(f.filename)
          # Store files in redis with an expiration so we hopefully don't leak resources.
-         redis.setex("file:" + filename, 60 * 10, f.read())
+         redis.setex("file:" + filename, 60 * 60, f.read())
          print(filename, "uploaded")
      else:
          abort(400)

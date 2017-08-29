@@ -26,6 +26,7 @@ import hashlib
 import binascii
 import os
 import os.path
+import random
 import traceback
 import redis
 import sys
@@ -172,7 +173,8 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
         else:
             redis_file = redis.get("file:" + fn)
         if redis_file:
-            tmp_filename = secure_filename(".tmp/" + fn.rsplit("/", 1)[-1])
+            random_portion = '%010x' % random.randrange(16**10)
+            tmp_filename = ".tmp/" + random_portion + "-" + secure_filename(fn.rsplit("/", 1)[-1])
             with open(tmp_filename, "wb") as f:
                 f.write(redis_file)
             binary = tmp_filename

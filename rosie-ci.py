@@ -237,7 +237,7 @@ def start_test(self, repo, ref):
     print("grabbing lock")
     # Retry the task in 10 seconds if the lock can't be grabbed.
     if not l.acquire(blocking=False):
-        raise self.retry(countdown=30, max_retries=10)
+        raise self.retry(countdown=30, max_retries=25)
     print("Lock grabbed")
     set_status(repo, ref, "pending", "https://adafruit.com", "Commencing Rosie test.")
     repo_path = cwd + "/repos/" + base_repo
@@ -312,6 +312,7 @@ def travis():
     sha = data["commit"]
     if data["type"] == "pull_request":
         sha = data["head_commit"]
+    print(data)
 
     upload_lock = "upload-lock:" + sha
 

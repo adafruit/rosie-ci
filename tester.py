@@ -34,7 +34,7 @@ redis = redis.Redis()
 def redis_log(key, message):
     redis.append(key, message)
 
-def run_circuitpython_tests(log_key, board_name, test_env, mountpoint, serial_connection, tests):
+def run_circuitpython_tests(log_key, board_name, test_env, mountpoint, disk_device, serial_connection, tests):
     # Get into the REPL and disable autoreload.
     serial_connection.write(b'\x03\x03')
     serial_connection.reset_input_buffer()
@@ -74,14 +74,20 @@ def run_circuitpython_tests(log_key, board_name, test_env, mountpoint, serial_co
 
         shutil.copy(test_file, mountpoint + "/code.py")
         os.sync()
-        time.sleep(0.05)
+        # Monitor the block device so we know when the sync request is actually finished.
+        with open("/sys/block/" + disk_device + "/stat", "r") as f:
+            disk_inflight = 1
+            while disk_inflight > 0:
+                f.seek(0)
+                stats = f.read()
+                disk_inflight = int(stats.split()[8])
 
         serial_connection.reset_input_buffer()
         serial_connection.write(b"\x04")
         output = b""
         safe_mode = False
         start_time = time.monotonic()
-        while not output.endswith(b"Use CTRL-D to reload.\r\n") and time.monotonic() - start_time < 10:
+        while not output.endswith(b"Use CTRL-D to reload.\r\n") and time.monotonic() - start_time < 30:
             try:
                 if serial_connection.in_waiting > 0:
                     output += serial_connection.read(serial_connection.in_waiting)
@@ -170,6 +176,7 @@ def run_tests(board, binary, tests, log_key=None):
                 raise RuntimeError("Cannot find CIRCUITPY disk for device: " + board["path"])
 
             disk_path = "/dev/disk/by-path/" + disk_path
+            disk_device = os.path.basename(os.readlink(disk_path))[:-1]
 
             with storage.mount(storage.NativeFileSystem(disk_path), "/media/cpy-" + board["path"]):
                 mountpoint = "/media/cpy-" + board["path"]
@@ -183,7 +190,7 @@ def run_tests(board, binary, tests, log_key=None):
                 if not serial_device_name:
                     raise RuntimeError("No CircuitPython serial connection found at path: " + board["path"])
                 with serial.Serial("/dev/" + serial_device_name) as conn:
-                    tests_ok = run_circuitpython_tests(log_key, board["board"], board["test_env"], mountpoint, conn, tests["circuitpython_tests"]) and tests_ok
+                    tests_ok = run_circuitpython_tests(log_key, board["board"], board["test_env"], mountpoint, disk_device, conn, tests["circuitpython_tests"]) and tests_ok
 
 
     return tests_ok

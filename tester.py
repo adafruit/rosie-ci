@@ -77,10 +77,15 @@ def run_circuitpython_tests(log_key, board_name, test_env, mountpoint, disk_devi
         # Monitor the block device so we know when the sync request is actually finished.
         with open("/sys/block/" + disk_device + "/stat", "r") as f:
             disk_inflight = 1
-            while disk_inflight > 0:
+            last_wait_time = 0
+            wait_time = 1
+            while disk_inflight > 0 or wait_time > last_wait_time:
                 f.seek(0)
                 stats = f.read()
-                disk_inflight = int(stats.split()[8])
+                block_stats = stats.split()
+                disk_inflight = int(block_stats[8])
+                last_wait_time = wait_time
+                wait_time = int(block_stats[9])
 
         serial_connection.reset_input_buffer()
         serial_connection.write(b"\x04")

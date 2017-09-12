@@ -136,7 +136,7 @@ def load_code(repo, ref):
     print("loaded", repo, ref)
 
 @celery.task(priority=9)
-def test_board(repo_lock_token, ref=None, repo=None, board=None):
+def test_board(repo_lock_token, ref=None, repo=None, tag=None, board=None):
     base_repo = redis.get("source:" + repo).decode("utf-8")
     repo_path = cwd + "/repos/" + base_repo
     log_key = "log:" + repo + "/" + ref
@@ -151,11 +151,14 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
         redis.append(log_key, "Missing or invalid .rosie.yml in repo.\n")
         return (repo_lock_token, False, True)
 
+    version = ref[:7]
+    if tag is not None:
+        version = tag
     binary = None
     if "rosie_upload" in test_cfg["binaries"]:
         fn = None
         try:
-            fn = test_cfg["binaries"]["rosie_upload"]["file_pattern"].format(board=board["board"], short_sha=ref[:7], extension="uf2")
+            fn = test_cfg["binaries"]["rosie_upload"]["file_pattern"].format(board=board["board"], short_sha=version, version=version, extension="uf2")
         except KeyError as e:
             redis.append(log_key, "Unable to construct filename because of unknown key: {0}\n".format(str(e)))
             return (repo_lock_token, False, True)
@@ -182,7 +185,7 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
         print("looking in aws")
         fn = None
         try:
-            fn = test_cfg["binaries"]["prebuilt_s3"]["file_pattern"].format(board=board["board"], short_sha=ref[:7], extension="uf2")
+            fn = test_cfg["binaries"]["prebuilt_s3"]["file_pattern"].format(board=board["board"], short_sha=version, version=version, extension="uf2")
         except KeyError as e:
             redis.append(log_key, "Unable to construct filename because of unknown key: {0}\n".format(str(e)))
             return (repo_lock_token, False, True)
@@ -234,11 +237,11 @@ def test_board(repo_lock_token, ref=None, repo=None, board=None):
 def start_test(self, repo, ref):
     base_repo = redis.get("source:" + repo).decode("utf-8")
     l = redis.lock(base_repo, timeout=60 * 60)
-    print("grabbing lock")
+    print("grabbing lock " + base_repo)
     # Retry the task in 10 seconds if the lock can't be grabbed.
     if not l.acquire(blocking=False):
         raise self.retry(countdown=30, max_retries=25)
-    print("Lock grabbed")
+    print("Lock grabbed " + base_repo)
     set_status(repo, ref, "pending", "https://adafruit.com", "Commencing Rosie test.")
     repo_path = cwd + "/repos/" + base_repo
     os.chdir(repo_path)
@@ -255,6 +258,7 @@ def finish_test(results, repo, ref):
     base_repo = redis.get("source:" + repo).decode("utf-8")
     l = redis.lock(base_repo)
     l.local.token = results[0][0]
+    print("releasing lock " + base_repo)
     l.release()
 
     test_config_ok = True
@@ -270,8 +274,8 @@ def finish_test(results, repo, ref):
     else:
         final_status(repo, ref, "success", "All tests passed.")
 
-def test_commit(repo, ref):
-    chain = start_test.s(repo, ref) | group(test_board.s(ref=ref, repo=repo, board=board) for board in config["devices"]) | finish_test.s(repo, ref)
+def test_commit(repo, ref, tag):
+    chain = start_test.s(repo, ref) | group(test_board.s(ref=ref, repo=repo, tag=tag, board=board) for board in config["devices"]) | finish_test.s(repo, ref)
     chain.delay()
 
 # Adapted from: https://gist.github.com/andrewgross/8ba32af80ecccb894b82774782e7dcd4
@@ -312,21 +316,32 @@ def travis():
     sha = data["commit"]
     if data["type"] == "pull_request":
         sha = data["head_commit"]
+    tag = None
+    if data["type"] == "push" and data["tag"] != None:
+        tag = data["tag"]
     print(data)
 
-    upload_lock = "upload-lock:" + sha
+    key = sha
+    if tag is not None:
+        key = tag
+
+    upload_lock = "upload-lock:" + key
 
     if data["state"] in ("started", ):
-        print("travis started", sha)
+        print("travis started", key)
         # Handle pulls differently.
-        load_code.delay(repo, "refs/heads/" + data["branch"])
+        if data["pull_request"]:
+            load_code.delay(repo, "pull/" + str(data["pull_request_number"]) + "/head")
+        else:
+            load_code.delay(repo, "refs/heads/" + data["branch"])
         redis.setex(upload_lock, 20 * 60, "locked")
         set_status(repo, sha, "pending", data["build_url"], "Waiting on Travis to complete.")
     elif data["state"] in ("passed", "failed"):
         print("travis finished")
-        set_status(repo, sha, "pending", data["build_url"], "Queueing Rosie test.")
+        key = repo + "/" + key
+        set_status(repo, sha, "pending", "https://rosie-ci.ngrok.io/log/" + key, "Queueing Rosie test.")
         redis.delete(upload_lock)
-        test_commit(repo, sha)
+        test_commit(repo, sha, tag)
     elif data["state"] is ("cancelled", ):
         print("travis cancelled")
         redis.delete(upload_lock)
@@ -363,9 +378,9 @@ def upload_file(sha):
 def rerun(owner, repo, sha):
     repo = owner + "/" + repo
     key = repo + "/" + sha
-    set_status(repo, sha, "pending", "https://mike-ci.ngrok.io/log/" + key, "Queueing manual Rosie test.")
+    set_status(repo, sha, "pending", "https://rosie-ci.ngrok.io/log/" + key, "Queueing manual Rosie test.")
 
-    test_commit(repo, sha)
+    test_commit(repo, sha, None)
     return jsonify({"msg": "Ok"})
 
 @app.route("/log/<owner>/<repo>/<sha>", methods=['GET'])

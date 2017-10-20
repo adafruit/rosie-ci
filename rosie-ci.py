@@ -81,6 +81,9 @@ anonymous_s3.meta.client.meta.events.register("choose-signer.s3.*", disable_sign
 cwd = os.getcwd()
 
 def set_status(repo, sha, state, target_url, description):
+    redis.append("log:" + repo + "/" + sha, "State %s: %s\n" % (state, description))
+    if state in ["pending", "error"]:
+        return
     data = {
         "state": state,
         "target_url": target_url,
@@ -90,7 +93,6 @@ def set_status(repo, sha, state, target_url, description):
     r = requests.post("https://api.github.com/repos/" + repo + "/statuses/" + sha,
                       json=data,
                       auth=(config["overall"]["github-username"], github_personal_access_token))
-    redis.append("log:" + repo + "/" + sha, "Commit state %s: %s\n" % (state, description))
 
 def final_status(repo, sha, state, description):
     # TODO(tannewt): Upload to the public S3 bucket instead. These may disappear.
@@ -219,17 +221,24 @@ def test_board(repo_lock_token, ref=None, repo=None, tag=None, board=None):
     test_config_ok = True
     tests_ok = True
     # Grab a lock on the device we're using for testing.
-    with redis.lock("lock:" + board["board"] + "-" + str(board["path"])):
-        # Run the tests.
-        try:
-            tests_ok = tester.run_tests(board, binary, test_cfg, log_key=log_key)
-        except Exception as e:
-            redis.append(log_key, "Exception while running tests on {0}:\n".format(board["board"]))
-            redis.append(log_key, traceback.format_exc())
-            test_config_ok = False
+    try:
+        with redis.lock("lock:" + board["board"] + "-" + str(board["path"])):
+            # Run the tests.
+            try:
+                tests_ok = tester.run_tests(board, binary, test_cfg, log_key=log_key)
+            except Exception as e:
+                redis.append(log_key, "Exception while running tests on {0}:\n".format(board["board"]))
+                redis.append(log_key, traceback.format_exc())
+                test_config_ok = False
+    except Exception as e:
+         # Redis exception so don't log it.
+         test_config_ok = False
 
     # Delete the binary since we're done with it.
-    os.remove(binary)
+    try:
+        os.remove(binary)
+    except FileNotFoundError:
+        redis.append(log_key, "Unable to remove file: {0}\n".format(binary))
     return (repo_lock_token, test_config_ok, tests_ok)
 
 # TODO(tannewt): Switch to separate queues if this causes lock contention.
@@ -237,15 +246,18 @@ def test_board(repo_lock_token, ref=None, repo=None, tag=None, board=None):
 def start_test(self, repo, ref):
     base_repo = redis.get("source:" + repo).decode("utf-8")
     l = redis.lock(base_repo, timeout=60 * 60)
+    log_key = "log:" + repo + "/" + ref
+    log_url = "https://rosie-ci.ngrok.io/log/" + repo + "/" + ref
     print("grabbing lock " + base_repo)
     # Retry the task in 10 seconds if the lock can't be grabbed.
     if not l.acquire(blocking=False):
+        if self.request.retries == 24:
+            set_status(repo, ref, "error", log_url, "Hit max retries. Please ping the owner.")
         raise self.retry(countdown=30, max_retries=25)
     print("Lock grabbed " + base_repo)
-    set_status(repo, ref, "pending", "https://adafruit.com", "Commencing Rosie test.")
+    set_status(repo, ref, "pending", log_url, "Commencing Rosie test.")
     repo_path = cwd + "/repos/" + base_repo
     os.chdir(repo_path)
-    log_key = "log:" + repo + "/" + ref
     try:
         redis.append(log_key, git.checkout(ref))
     except sh.ErrorReturnCode_128 as e:
@@ -259,7 +271,10 @@ def finish_test(results, repo, ref):
     l = redis.lock(base_repo)
     l.local.token = results[0][0]
     print("releasing lock " + base_repo)
-    l.release()
+    try:
+        l.release()
+    except redis.exceptions.LockError:
+        print("lock already released")
 
     test_config_ok = True
     tests_ok = True

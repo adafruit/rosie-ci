@@ -38,11 +38,15 @@ def run_circuitpython_tests(log_key, board_name, test_env, mountpoint, disk_devi
     # Get into the REPL and disable autoreload.
     serial_connection.write(b'\x03\x03')
     serial_connection.reset_input_buffer()
-    serial_connection.write(b"import samd\r")
-    serial_connection.write(b"samd.disable_autoreload()\r")
+    serial_connection.write(b"import supervisor\r")
     time.sleep(0.1)
     output = serial_connection.read(serial_connection.in_waiting)
-    if not output.endswith(b"samd.disable_autoreload()\r\n>>> "):
+    if not output.endswith(b"import supervisor\r\n>>> "):
+        serial_connection.write(b"import samd as supervisor\r")
+    serial_connection.write(b"supervisor.disable_autoreload()\r")
+    time.sleep(0.1)
+    output = serial_connection.read(serial_connection.in_waiting)
+    if not output.endswith(b"supervisor.disable_autoreload()\r\n>>> "):
         redis_log(log_key, output)
         raise RuntimeError("Unable to enter the REPL.")
 
@@ -141,7 +145,7 @@ def run_tests(board, binary, tests, log_key=None):
     with redis.lock("lock:device@" + board["path"], timeout=60*20) as lock:
         # Trigger the bootloader.
         if bootloader in ("uf2", "samba"):
-            s = serial.Serial("/dev/" + serial_device_name, 1200)
+            s = serial.Serial("/dev/" + serial_device_name, 1200, write_timeout=4, timeout=4)
             s.close()
 
         time.sleep(5)
@@ -194,7 +198,7 @@ def run_tests(board, binary, tests, log_key=None):
                         serial_device_name = port.name
                 if not serial_device_name:
                     raise RuntimeError("No CircuitPython serial connection found at path: " + board["path"])
-                with serial.Serial("/dev/" + serial_device_name) as conn:
+                with serial.Serial("/dev/" + serial_device_name, write_timeout=4, timeout=4) as conn:
                     tests_ok = run_circuitpython_tests(log_key, board["board"], board["test_env"], mountpoint, disk_device, conn, tests["circuitpython_tests"]) and tests_ok
 
 

@@ -52,6 +52,7 @@ from werkzeug.utils import secure_filename
 from tasks import make_celery
 
 from celery import group
+from kombu import Queue, Exchange
 
 import boto3
 from botocore.handlers import disable_signing
@@ -61,7 +62,9 @@ import tester
 app = Flask(__name__)
 app.config.update(
     CELERY_BROKER_URL='redis://localhost:6379/0',
-    CELERY_RESULT_BACKEND='redis://localhost:6379/0'
+    CELERY_RESULT_BACKEND='redis://localhost:6379/0',
+    CELERY_TASK_QUEUES=(Queue('high', Exchange('high'), routing_key='high'),
+                        Queue('low', Exchange('low'), routing_key='low'))
 )
 celery = make_celery(app)
 
@@ -82,6 +85,8 @@ cwd = os.getcwd()
 
 def set_status(repo, sha, state, target_url, description):
     redis.append("log:" + repo + "/" + sha, "State %s: %s\n" % (state, description))
+    if state == "error":
+        print("Run {}/{} errored out: {}".format(repo, sha, description))
     if state in ["pending", "error"]:
         return
     data = {
@@ -98,7 +103,7 @@ def final_status(repo, sha, state, description):
     # TODO(tannewt): Upload to the public S3 bucket instead. These may disappear.
     set_status(repo, sha, state, "https://rosie-ci.ngrok.io/log/" + repo + "/" + sha, description)
 
-@celery.task()
+@celery.task(queue="low")
 def load_code(repo, ref):
     print("loading code from " + repo)
     os.chdir(cwd)
@@ -123,21 +128,20 @@ def load_code(repo, ref):
     repo_path = "repos/" + base_repo
     github_base_url = "https://github.com/" + base_repo + ".git"
     github_head_url = "https://github.com/" + repo + ".git"
-    if not os.path.isdir(repo_path):
-        print("waiting for repo lock")
-        with redis.lock(base_repo):
+    print("waiting for repo lock")
+    with redis.lock(base_repo, timeout=5*60, blocking_timeout=20*60):
+        if not os.path.isdir(repo_path):
             os.makedirs(repo_path)
             git.clone(github_base_url, repo_path)
 
             # We must make .tmp after cloning because cloning will fail when the
             # directory isn't empty.
             os.makedirs(repo_path + "/.tmp")
-    with redis.lock(base_repo):
         os.chdir(repo_path)
         git.fetch(github_head_url, ref)
     print("loaded", repo, ref)
 
-@celery.task(priority=9)
+@celery.task(queue="high")
 def test_board(repo_lock_token, ref=None, repo=None, tag=None, board=None):
     base_repo = redis.get("source:" + repo).decode("utf-8")
     repo_path = cwd + "/repos/" + base_repo
@@ -180,6 +184,7 @@ def test_board(repo_lock_token, ref=None, repo=None, tag=None, board=None):
         if redis_file:
             random_portion = '%010x' % random.randrange(16**10)
             tmp_filename = ".tmp/" + random_portion + "-" + secure_filename(fn.rsplit("/", 1)[-1])
+            os.makedirs(".tmp", exist_ok=True)
             with open(tmp_filename, "wb") as f:
                 f.write(redis_file)
             binary = tmp_filename
@@ -242,7 +247,7 @@ def test_board(repo_lock_token, ref=None, repo=None, tag=None, board=None):
     return (repo_lock_token, test_config_ok, tests_ok)
 
 # TODO(tannewt): Switch to separate queues if this causes lock contention.
-@celery.task(bind=True, priority=0)
+@celery.task(bind=True, queue="low")
 def start_test(self, repo, ref):
     base_repo = redis.get("source:" + repo).decode("utf-8")
     l = redis.lock(base_repo, timeout=60 * 60)
@@ -255,17 +260,24 @@ def start_test(self, repo, ref):
             set_status(repo, ref, "error", log_url, "Hit max retries. Please ping the owner.")
         raise self.retry(countdown=30, max_retries=25)
     print("Lock grabbed " + base_repo)
+    redis.set("owner-" + base_repo, log_url)
     set_status(repo, ref, "pending", log_url, "Commencing Rosie test.")
     repo_path = cwd + "/repos/" + base_repo
     os.chdir(repo_path)
     try:
         redis.append(log_key, git.checkout(ref))
     except sh.ErrorReturnCode_128 as e:
+        print("error 128")
         redis.append(log_key, e.full_cmd + "\n" + e.stdout.decode('utf-8') + "\n" + e.stderr.decode('utf-8'))
         final_status(repo, ref, "error", "Git error in Rosie.")
+    except sh.ErrorReturnCode_1 as e:
+        print("error 1")
+        redis.append(log_key, e.full_cmd + "\n" + e.stdout.decode('utf-8') + "\n" + e.stderr.decode('utf-8'))
+        final_status(repo, ref, "error", "Git checkout error in Rosie.")
+    print("test started " + log_url)
     return l.local.token.decode("utf-8")
 
-@celery.task(priority=9)
+@celery.task(queue="high")
 def finish_test(results, repo, ref):
     base_repo = redis.get("source:" + repo).decode("utf-8")
     l = redis.lock(base_repo)

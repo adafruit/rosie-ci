@@ -2,17 +2,13 @@
 Introduction
 ============
 
-.. image :: https://badges.gitter.im/adafruit/circuitpython.svg
-    :target: https://gitter.im/adafruit/circuitpython?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge
-    :alt: Gitter
-
 .. image :: https://img.shields.io/discord/327254708534116352.svg
     :target: https://adafru.it/discord
     :alt: Discord
 
-Rosie is an on-microcontroller testing service that runs on a Raspberry Pi. Its
-meant to run after Travis builds and tests binaries. Build artifacts and test
-results are stored to an Amazon S3 bucket. It is used to test
+Rosie is an on-microcontroller testing service that runs on a Raspberry Pi or
+other Ubuntu or Debian computer. Its meant to run after Travis builds and tests
+binaries. Build artifacts are uploaded to Rosie from Travis. It is used to test
 `Adafruit CircuitPython <https://github.com/adafruit/circuitpython>`_.
 
 Setup
@@ -21,7 +17,7 @@ Setup
 Here are the instructions for one time setup. Its simpler to start once
 everything is installed.
 
-Debian Dependencies
+Debian/Ubuntu Dependencies
 +++++++++++++++++++++++++++
 
 .. code-block:: shell
@@ -30,16 +26,26 @@ Debian Dependencies
     sudo apt-get upgrade # make sure already installed packages are latest
     sudo apt-get install git python3 python3-venv python3-pip redis-server libffi-dev libssl-dev pmount screen
 
+Permissions
++++++++++++
+On Ubuntu you may need to add the user running Rosie to the dialout group so
+that Rosie can connect to the serial connections.
+
+.. code-block:: shell
+
+    sudo adduser <username> dialout
+
 ngrok
 +++++++
 
-Rosie CI also uses `ngrok <>`_ installed manually to present the http interface
-to the outside internet. This is preferable to configuring your router to expose
-your Raspberry Pi directly. See `here <https://ngrok.com/download>`_ for
-installation instructions and `here <https://dashboard.ngrok.com/get-started>`_
-for instructions on authenticating your instance. Without a paid plan, your url
-will change every time you run ngrok. It will still work for testing but be
-inconvenient when connecting multiple GitHub repos to it.
+Rosie CI also uses `ngrok <https://ngrok.com>`_ installed manually to present
+the http interface to the outside internet. This is preferable to configuring
+your router to expose your Rosie computer directly. See `here
+<https://ngrok.com/download>`_ for installation instructions and `here
+<https://dashboard.ngrok.com/get-started>`_ for instructions on authenticating
+your instance. Without a paid plan, your url will change every time you run
+ngrok. It will still work for testing but be inconvenient when connecting
+multiple GitHub repos to it.
 
 Rosie CI
 ++++++++++
@@ -94,7 +100,9 @@ and then edit it.
 
 To determine the USB paths of connected devices use ``/dev/disk/by-path`` or
 ``/dev/serial/by-path`` to list the active devices before plugging the device in
-and then rerun it after plugging in the new board.
+and then rerun it after plugging in the new board. If the path is less than two
+numbers such as "1" or "1.2" then make sure and quote the number so its
+interpreted by yaml as a string.
 
 Test repo configuration
 +++++++++++++++++++++++++++
@@ -107,12 +115,7 @@ where to find binaries built by Travis and where to find the tests. It also
 includes test configuration things such as helper modules that need to be loaded
 alongside the test and how to evaluate the results.
 
-Next, you need to hook the GitHub repo to Rosie via a webhook with the rosie URL
-such as ``https://<subdomain>.ngrok.io/github``. It should have the Create, Pull
-Request, Push and Release events checked. Set the secret as the same as from
-your ``env.sh`` file on the Raspberry Pi.
-
-Lastly, Travis needs to be setup to call Rosie to let it know its progress. This
+Next, Travis needs to be setup to call Rosie to let it know its progress. This
 is done through ``.travis.yml``. Its added as a ``webhooks`` under
 ``notifications``.
 
@@ -142,9 +145,9 @@ we have a screenrc file that manages starting everything up.
     screen -c rosie-ci.screenrc
 
 This command will return back to your prompt with something like
-``[detached from 10866.pts-0.raspberrypi]``. This means that Rosie is now running
-within screen session behind the scenes. You can view output of it by attaching
-to the screen with:
+``[detached from 10866.pts-0.raspberrypi]``. This means that Rosie is now
+running within screen session behind the scenes. You can view output of it by
+attaching to the screen with:
 
 .. code-block:: shell
 
@@ -157,15 +160,24 @@ view the output before screen shuts down.
 How it works
 ============
 
-Rosie uses Flask to accept webhooks from GitHub and Celery. The GitHub webhook
-triggers a fetch of the commit data. The first "starting" Travis webhook simply
-triggers Rosie to notify GitHub that it intends on testing the commit. Rosie then
-waits until Travis finishes because it relies on build artifacts that Travis
-creates. This approach ensures a consistent build environment for binaries (and
-Debian on Raspberry Pi has old ARM GCC packages).
+Rosie uses Flask to accept webhooks from Travis. The Travis start webhook
+triggers a fetch of the commit data. Rosie then waits until Travis finishes
+because it relies on build artifacts that Travis creates. The code run by
+Travis that builds the artifacts also uploads them to Rosie by posting the
+files to http://<rosie name>.ngrok.io/upload/<commit hash>. This approach
+ensures a consistent build environment for binaries (and Debian on Raspberry Pi
+has old ARM GCC packages).
+
+After the Travis build finishes, Celery is used to run the tests in parallel and
+separately from the web service. Two workers and queues are used so that tasks
+which hold a lock can be run without being starved by tasks waiting for a
+a lock. For example, test_board tasks are in the high priority queue because
+they hold a repo lock. load_code and start_test tasks try to grab a lock on
+start so they are in the low priority queue and will start once the high
+priority tasks with the lock finish.
 
 Celery is backed by Redis for scheduling and communication. Redis is also used
-for temporary logs and locking resources such as repos and boards.
+for logs and locking resources such as repos and boards.
 
 Contributing
 ============
@@ -173,11 +185,3 @@ Contributing
 Contributions are welcome! Please read our `Code of Conduct
 <https://github.com/adafruit/rosie-ci/blob/master/CODE_OF_CONDUCT.md>`_
 before contributing to help this project stay welcoming.
-
-API Reference
-=============
-
-.. toctree::
-   :maxdepth: 2
-
-   api

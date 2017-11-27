@@ -96,7 +96,7 @@ def run_circuitpython_tests(log_key, board_name, test_env, mountpoint, disk_devi
         output = b""
         safe_mode = False
         start_time = time.monotonic()
-        while not output.endswith(b"Use CTRL-D to reload.\r\n") and time.monotonic() - start_time < 30:
+        while not output.endswith(b"Use CTRL-D to reload.\r\n") and time.monotonic() - start_time < 60:
             try:
                 if serial_connection.in_waiting > 0:
                     output += serial_connection.read(serial_connection.in_waiting)
@@ -106,6 +106,7 @@ def run_circuitpython_tests(log_key, board_name, test_env, mountpoint, disk_devi
                 # We get OSError if our USB dies from safe mode.
                 safe_mode = True
                 break
+        output += serial_connection.read(serial_connection.in_waiting)
 
         if safe_mode:
             redis_log(log_key, test_file + " crashed on " + board_name + "!\n" + output.decode("utf-8") + "\n")
@@ -131,10 +132,11 @@ def run_circuitpython_tests(log_key, board_name, test_env, mountpoint, disk_devi
     redis_log(log_key, test_outcomes)
     return tests_ok
 
+# The device is already locked.
 def run_tests(board, binary, tests, log_key=None):
     serial_device_name = None
     for port in list_ports.comports():
-        if port.location and port.location[2:] == board["path"]:
+        if port.location and port.location.split(":")[0][2:] == board["path"]:
             serial_device_name = port.name
     if not serial_device_name:
         raise RuntimeError("Board not found at path: " + board["path"])
@@ -142,64 +144,70 @@ def run_tests(board, binary, tests, log_key=None):
     bootloader = board["bootloader"]
     tests_ok = True
 
-    with redis.lock("lock:device@" + board["path"], timeout=60*20) as lock:
-        # Trigger the bootloader.
-        if bootloader in ("uf2", "samba"):
-            s = serial.Serial("/dev/" + serial_device_name, 1200, write_timeout=4, timeout=4)
-            s.close()
+    # Trigger the bootloader.
+    if bootloader in ("uf2", "samba"):
+        s = serial.Serial("/dev/" + serial_device_name, 1200, write_timeout=4, timeout=4)
+        s.close()
 
-        time.sleep(5)
+    time.sleep(5)
 
-        if bootloader == "uf2":
-            # Mount the filesystem.
-            disk_path = None
+    if bootloader == "uf2":
+        # Mount the filesystem.
+        disk_path = None
+        for disk in os.listdir("/dev/disk/by-path"):
+            if board["path"] in disk and "0:0:0:0" in disk:
+                disk_path = disk
+        if not disk_path:
+            raise RuntimeError("Disk not found for board: " + board["path"])
+        
+        disk_path = "/dev/disk/by-path/" + disk_path
+        if os.path.isfile(disk_path + "-part1"):
+            raise RuntimeError("MCU not in bootloader because part1 exists.")
+
+        sh.pmount("-tvfat", disk_path, "fs-" + board["path"])
+        mountpoint = "/media/fs-" + board["path"]
+        redis_log(log_key, "Successfully mounted UF2 bootloader at {0}\n".format(mountpoint))
+        with open(mountpoint + "/INFO_UF2.TXT", "r") as f:
+            redis_log(log_key, f.read() + "\n")
+        shutil.copy(binary, mountpoint)
+        # Unmount the mountpoint in case the device has disappeared already after the UF2
+        # was flashed.
+        start_time = time.monotonic()
+        unmounted = False
+        while not unmounted and start_time - time.monotonic() < 30:
+            try:
+                sh.pumount(mountpoint)
+                unmounted = True
+            except sh.ErrorReturnCode_5:
+                time.sleep(0.1)
+
+    if "circuitpython_tests" in tests:
+        # First find our CircuitPython disk.
+        start_time = time.monotonic()
+        disk_path = None
+        while not disk_path and time.monotonic() - start_time < 10:
             for disk in os.listdir("/dev/disk/by-path"):
-                if board["path"] in disk:
+                if board["path"] in disk and disk.endswith("part1"):
                     disk_path = disk
-            if not disk_path:
-                raise RuntimeError("Disk not found for board: " + board["path"])
-            
-            disk_path = "/dev/disk/by-path/" + disk_path
-            if os.path.isfile(disk_path + "-part1"):
-                raise RuntimeError("MCU not in bootloader because part1 exists.")
+        if not disk_path:
+            raise RuntimeError("Cannot find CIRCUITPY disk for device: " + board["path"])
 
-            sh.pmount(disk_path, "fs-" + board["path"])
-            mountpoint = "/media/fs-" + board["path"]
-            redis_log(log_key, "Successfully mounted UF2 bootloader at {0}\n".format(mountpoint))
-            with open(mountpoint + "/INFO_UF2.TXT", "r") as f:
-                redis_log(log_key, f.read() + "\n")
-            shutil.copy(binary, mountpoint)
-            # Unmount the mountpoint in case the device has disappeared already after the UF2
-            # was flashed.
-            sh.pumount(mountpoint)
+        disk_path = "/dev/disk/by-path/" + disk_path
+        disk_device = os.path.basename(os.readlink(disk_path))[:-1]
 
-        if "circuitpython_tests" in tests:
-            # First find our CircuitPython disk.
-            start_time = time.monotonic()
-            disk_path = None
-            while not disk_path and time.monotonic() - start_time < 10:
-                for disk in os.listdir("/dev/disk/by-path"):
-                    if board["path"] in disk and disk.endswith("part1"):
-                        disk_path = disk
-            if not disk_path:
-                raise RuntimeError("Cannot find CIRCUITPY disk for device: " + board["path"])
+        with storage.mount(storage.NativeFileSystem(disk_path), "/media/cpy-" + board["path"]):
+            mountpoint = "/media/cpy-" + board["path"]
+            redis_log(log_key, "Successfully mounted CIRCUITPY disk at {0}\n".format(mountpoint))
 
-            disk_path = "/dev/disk/by-path/" + disk_path
-            disk_device = os.path.basename(os.readlink(disk_path))[:-1]
-
-            with storage.mount(storage.NativeFileSystem(disk_path), "/media/cpy-" + board["path"]):
-                mountpoint = "/media/cpy-" + board["path"]
-                redis_log(log_key, "Successfully mounted CIRCUITPY disk at {0}\n".format(mountpoint))
-
-                # Now find the serial.
-                serial_device_name = None
-                for port in list_ports.comports():
-                    if port.location and port.location[2:] == board["path"]:
-                        serial_device_name = port.name
-                if not serial_device_name:
-                    raise RuntimeError("No CircuitPython serial connection found at path: " + board["path"])
-                with serial.Serial("/dev/" + serial_device_name, write_timeout=4, timeout=4) as conn:
-                    tests_ok = run_circuitpython_tests(log_key, board["board"], board["test_env"], mountpoint, disk_device, conn, tests["circuitpython_tests"]) and tests_ok
+            # Now find the serial.
+            serial_device_name = None
+            for port in list_ports.comports():
+                if port.location and port.location.split(":")[0][2:] == board["path"]:
+                    serial_device_name = port.name
+            if not serial_device_name:
+                raise RuntimeError("No CircuitPython serial connection found at path: " + board["path"])
+            with serial.Serial("/dev/" + serial_device_name, 115200, write_timeout=4, timeout=4) as conn:
+                tests_ok = run_circuitpython_tests(log_key, board["board"], board["test_env"], mountpoint, disk_device, conn, tests["circuitpython_tests"]) and tests_ok
 
 
     return tests_ok

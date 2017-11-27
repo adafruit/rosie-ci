@@ -41,6 +41,6 @@ def mount(fs, mount_point):
     if not isinstance(fs, NativeFileSystem):
         raise ValueError("Only NativeFileSystems are supported on Raspberry Pi.")
 
-    sh.pmount(fs.device_path, mount_point)
+    sh.pmount("-tvfat", fs.device_path, mount_point)
     return AutoUnmount(mount_point)
 

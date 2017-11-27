@@ -222,12 +222,13 @@ def test_board(repo_lock_token, ref=None, repo=None, tag=None, board=None):
     if binary == None:
         redis.append(log_key, "Unable to find binary for board {0}.\n".format(board))
         return (repo_lock_token, False, True)
-
     test_config_ok = True
     tests_ok = True
     # Grab a lock on the device we're using for testing.
+    print("waiting for device lock")
     try:
-        with redis.lock("lock:" + board["board"] + "-" + str(board["path"])):
+        with redis.lock("lock:" + board["board"] + "-" + str(board["path"]), timeout=15*60, blocking_timeout=20*60):
+            print("device lock grabbed")
             # Run the tests.
             try:
                 tests_ok = tester.run_tests(board, binary, test_cfg, log_key=log_key)
@@ -352,13 +353,15 @@ def travis():
     if tag is not None:
         key = tag
 
-    upload_lock = "upload-lock:" + key
+    upload_lock = "upload-lock:" + sha
 
     if data["state"] in ("started", ):
         print("travis started", key)
         # Handle pulls differently.
         if data["pull_request"]:
             load_code.delay(repo, "pull/" + str(data["pull_request_number"]) + "/head")
+        elif data["tag"]:
+            load_code.delay(repo, "refs/tags/" + tag)
         else:
             load_code.delay(repo, "refs/heads/" + data["branch"])
         redis.setex(upload_lock, 20 * 60, "locked")
@@ -395,7 +398,7 @@ def upload_file(sha):
      if f and f.filename == secure_filename(f.filename):
          filename = secure_filename(f.filename)
          # Store files in redis with an expiration so we hopefully don't leak resources.
-         redis.setex("file:" + filename, 60 * 60, f.read())
+         redis.setex("file:" + filename, 120 * 60, f.read())
          print(filename, "uploaded")
      else:
          abort(400)
